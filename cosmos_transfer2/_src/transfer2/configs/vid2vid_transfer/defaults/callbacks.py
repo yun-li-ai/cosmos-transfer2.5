@@ -25,6 +25,9 @@ from cosmos_transfer2._src.predict2.configs.common.defaults.callbacks import (
     SPEED_CALLBACKS,
     WANDB_CALLBACK,
 )
+from cosmos_transfer2._src.predict2_multiview.callbacks.wandb_checkpoint_upload import (
+    WandbCheckpointUploadCallback,
+)
 from cosmos_transfer2._src.transfer2.callbacks.every_n_draw_sample import EveryNDrawSample
 from cosmos_transfer2._src.transfer2.callbacks.frame_loss_log import FrameLossLog
 from cosmos_transfer2._src.transfer2.callbacks.sigma_loss_analysis_per_frame import SigmaLossAnalysisPerFrame
@@ -73,6 +76,11 @@ LOAD_BASE_MODEL_CALLBACK = dict(
     load_base_model=L(LoadBaseModel)(),
 )
 
+# Upload each saved checkpoint to wandb as a model artifact (only when saving locally).
+WANDB_CKPT_CALLBACK = dict(
+    wandb_ckpt=L(WandbCheckpointUploadCallback)(),
+)
+
 
 def register_callbacks():
     cs = ConfigStore.instance()
@@ -93,4 +101,10 @@ def register_callbacks():
         package="trainer.callbacks",
         name="load_base_model_callbacks",
         node=LOAD_BASE_MODEL_CALLBACK,
+    )
+    cs.store(
+        group="callbacks",
+        package="trainer.callbacks",
+        name="wandb_ckpt",
+        node=WANDB_CKPT_CALLBACK,
     )

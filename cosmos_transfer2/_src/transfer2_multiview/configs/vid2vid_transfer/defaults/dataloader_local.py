@@ -272,6 +272,36 @@ def register_dataloader_local() -> None:
         ),
     )
 
+    # 7-view HDMap with nuScenes-style folder names (FRONT_CENTER, REAR_LEFT, etc.). Override dataset_dir to your path.
+    ROG_FOLDER_TO_CAMERA = {
+        "FRONT_CENTER": "camera_front_wide_120fov",
+        "FRONT_CENTER_NARROW": "camera_front_tele_30fov",
+        "FRONT_LEFT": "camera_cross_left_120fov",
+        "FRONT_RIGHT": "camera_cross_right_120fov",
+        "REAR_LEFT": "camera_rear_left_70fov",
+        "REAR_RIGHT": "camera_rear_right_70fov",
+        "REAR_CENTER": "camera_rear_tele_30fov",
+    }
+    dataset_rog = L(MultiviewTransferDataset)(
+        dataset_dir="/workspace/datasets/rog102_20260131_211850_v1",
+        augmentation_config=augmentation_config,
+        folder_to_camera_key=ROG_FOLDER_TO_CAMERA,
+    )
+    cs.store(
+        group="data_train",
+        package="dataloader_train",
+        name="example_multiview_train_data_control_input_hdmap_rog",
+        node=L(get_generic_dataloader)(
+            dataset=dataset_rog,
+            sampler=L(get_sampler)(dataset=dataset_rog) if dist.is_initialized() else None,
+            collate_fn=collate_fn,
+            batch_size=1,
+            drop_last=True,
+            num_workers=4,
+            pin_memory=True,
+        ),
+    )
+
     # Agibot 3-view multicontrol (edge, depth, seg, vis)
     # num_video_frames must match model: tokenizer.get_pixel_num_frames(state_t) = (24-1)*4+1 = 93
     for ctrl_type in ("edge", "depth", "seg", "vis"):

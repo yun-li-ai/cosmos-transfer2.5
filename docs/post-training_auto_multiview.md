@@ -85,6 +85,20 @@ The model will be post-trained using the multiview dataset. See the [data config
 
 Checkpoints are saved to `${IMAGINAIRE_OUTPUT_ROOT}/PROJECT/GROUP/NAME/checkpoints`. By default, `IMAGINAIRE_OUTPUT_ROOT` is `/tmp/imaginaire4-output`. We strongly recommend setting `IMAGINAIRE_OUTPUT_ROOT` to a location with sufficient storage space for your checkpoints.
 
+**Uploading checkpoints to Weights & Biases:** Checkpoint files are not sent to wandb by default (only metrics, config, and sample media are). To also upload each saved checkpoint as a wandb artifact, add the `wandb_ckpt` callback. Example (with wandb enabled and local checkpoint saving):
+
+```bash
+torchrun --nproc_per_node=8 --master_port=12341 -m scripts.train \
+  --config=cosmos_transfer2/_src/transfer2_multiview/configs/vid2vid_transfer/config.py \
+  -- experiment=transfer2_auto_multiview_post_train_example \
+  data_train=example_multiview_train_data_control_input_hdmap_rog \
+  +trainer.callbacks.wandb_ckpt._target_=cosmos_transfer2._src.predict2_multiview.callbacks.wandb_checkpoint_upload.WandbCheckpointUploadCallback
+```
+
+Use a leading `+` so Hydra **appends** the new `wandb_ckpt` key. Without `+`, `trainer.callbacks` is struct-typed and rejects unknown keys (`Key 'wandb_ckpt' is not in struct`).
+
+This only works when checkpoints are saved to local disk (i.e. `checkpoint.save_to_object_store.enabled` is false, as in the example experiment). Each checkpoint directory (e.g. `iter_000000200`) is uploaded as a wandb artifact of type `model`.
+
 In the above example, `PROJECT` is `cosmos_transfer_v2p5`, `GROUP` is `auto_multiview`, `NAME` is `2b_cosmos_multiview_post_train_example`.
 
 See the job config to understand how they are determined.
