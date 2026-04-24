@@ -1,0 +1,1 @@
+docker build -f Dockerfile -q  --build-arg CUDA_NAME=cu128 --build-arg STANDALONE=true  -t us-phoenix-1.ocir.io/idskhu5vqvtl/lilypad/sds:cosmos_transfer2.5_v0.0.4 .  

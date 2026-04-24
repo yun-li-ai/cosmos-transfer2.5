@@ -46,14 +46,18 @@ def init() -> int | None:
     if dist.is_initialized():
         return torch.cuda.current_device()
 
-    # Set GPU affinity.
-    pynvml.nvmlInit()
     local_rank = int(os.getenv("LOCAL_RANK", 0))
+    # Set GPU affinity — skip gracefully if NVML is unavailable (e.g. driver
+    # library not mounted in container).
     try:
-        device = Device(local_rank)
-        os.sched_setaffinity(0, device.get_cpu_affinity())
-    except pynvml.NVMLError as e:
-        log.warning(f"Failed to set device affinity: {e}")
+        pynvml.nvmlInit()
+        try:
+            device = Device(local_rank)
+            os.sched_setaffinity(0, device.get_cpu_affinity())
+        except pynvml.NVMLError as e:
+            log.warning(f"Failed to set device affinity: {e}")
+    except (OSError, pynvml.NVMLError) as e:
+        log.warning(f"NVML unavailable, skipping CPU affinity: {e}")
     # Set up NCCL communication.
     os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "0"
     os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"

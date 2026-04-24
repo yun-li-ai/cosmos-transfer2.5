@@ -19,6 +19,8 @@
 
 set -e
 
-uv sync --locked --extra=${CUDA_NAME} || true
+if [ "${SKIP_UV_SYNC}" != "true" ]; then
+    uv sync --locked --inexact --extra=${CUDA_NAME} || true
+fi
 
 exec "$@"

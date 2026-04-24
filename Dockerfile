@@ -62,10 +62,26 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # We mount the source code to /tmp and copy it to /workspace if in standalone mode.
 ARG STANDALONE
 RUN --mount=type=bind,source=.,target=/tmp/workspace \
-   if [ "$STANDALONE" = "true" ] ; then cp -r /tmp/workspace/* /workspace && just install && rm -rf /workspace/.git ; else echo "Run just install to install all the dependencies at runtime" ; fi
+   if [ "$STANDALONE" = "true" ] ; then cp -r /tmp/workspace/* /workspace && just install ${CUDA_NAME} && rm -rf /workspace/.git ; else echo "Run just install to install all the dependencies at runtime" ; fi
 
 # Place executables in the environment at the front of the path
 ENV PATH="/workspace/.venv/bin:$PATH"
+
+# Install Ray for Lilypad workload orchestration. Ray is not in uv.lock (it's Applied-internal),
+# so we install it separately. The entrypoint uses --inexact to prevent uv sync from pruning it.
+RUN uv pip install "ray[default]==2.50.1.7" --extra-index-url https://ursa.pypi.applied.dev/simple
+
+# click 8.3.x _Sentinel enum uses object() values that fail Python 3.10's deepcopy identity
+# reconstruction; Ray's add_command_alias calls copy.deepcopy() at import time and crashes.
+# Downgrade to 8.2.x which has proper __deepcopy__ support.
+RUN uv pip install "click==8.2.1"
+
+# Install Lilypad SDK for cross-region boto caching utilities.
+RUN uv pip install "lilypad-py==2.27.0" --extra-index-url https://ursa.pypi.applied.dev/simple
+
+# Skip uv sync at container start — all deps are already installed above (STANDALONE=true bakes
+# everything in at build time). This prevents uv sync from downgrading click and breaking Ray.
+ENV SKIP_UV_SYNC=true
 
 ENTRYPOINT ["/workspace/bin/entrypoint.sh"]
 
