@@ -7,50 +7,67 @@ import tempfile
 from pathlib import Path
 
 import boto3
+import botocore.config
 import ray
 from lilypad.public.sdk_py.cached_file_access.boto import get_readonly_boto_client
 
 logger = logging.getLogger(__name__)
 
+# OCI S3-compat requires payload signing for PUT and disables the default
+# AWS SDK v2 checksum headers that OCI doesn't support.
+_OCI_BOTO_CONFIG = botocore.config.Config(
+    s3={"payload_signing_enabled": True},
+    request_checksum_calculation="when_required",
+    response_checksum_validation="when_required",
+)
 
-def _plain_oci_client():
-    # Used for LIST (assets) and PUT (outputs) — AIStore denies both operations.
+
+def _plain_oci_client() -> boto3.client:
     return boto3.client(
         "s3",
         endpoint_url=os.environ["AWS_ENDPOINT_URL_S3"],
         region_name=os.environ["AWS_DEFAULT_REGION"],
         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        config=_OCI_BOTO_CONFIG,
     )
 
 
-def _download_prefix(client, bucket: str, prefix: str, local_dir: Path) -> None:
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            relative = key[len(prefix):].lstrip("/")
-            dest = local_dir / relative
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            logger.info("Downloading s3://%s/%s -> %s", bucket, key, dest)
-            client.download_file(bucket, key, str(dest))
+def _remap_hf_snapshot(
+    hf_cache_dir: Path,
+    repo: str,
+    expected_revision: str,
+    logger: "logging.Logger",
+) -> None:
+    """Copy snapshots/<actual_rev>/ to snapshots/<expected_rev>/ when they differ.
 
+    The OCI cache may have been staged at a different commit than what
+    checkpoint_db.py requests. Since file content is identical, we can just
+    alias the snapshot directory. HF hub with HF_HUB_OFFLINE=1 looks up files
+    by snapshot path, not by blob hash, so this is sufficient.
+    """
+    import shutil
 
-def _upload_dir(client, local_dir: Path, bucket: str, prefix: str) -> None:
-    for path in sorted(local_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        key = f"{prefix}/{path.relative_to(local_dir)}".lstrip("/")
-        logger.info("Uploading %s -> s3://%s/%s", path, bucket, key)
-        client.upload_file(str(path), bucket, key)
+    model_dir = hf_cache_dir / ("models--" + repo.replace("/", "--"))
+    refs_main = model_dir / "refs" / "main"
+    if not refs_main.exists():
+        logger.warning("_remap_hf_snapshot: refs/main not found for %s, skipping", repo)
+        return
 
+    actual_revision = refs_main.read_text().strip()
+    if actual_revision == expected_revision:
+        return
 
-_HF_PREDICT2_MODEL = "models--nvidia--Cosmos-Predict2.5-2B"
-_HF_TOKENIZER_REVISION = "6787e176dce74a101d922174a95dba29fa5f0c55"
-# SHA-256 of the tokenizer.pth blob (from local HF cache filename).
-_HF_TOKENIZER_BLOB_SHA256 = (
-    "38071ab59bd94681c686fa51d75a1968f64e470262043be31f7a094e442fd981"
-)
+    actual_snapshot = model_dir / "snapshots" / actual_revision
+    expected_snapshot = model_dir / "snapshots" / expected_revision
+
+    if not actual_snapshot.exists():
+        logger.warning("_remap_hf_snapshot: snapshot %s not found for %s, skipping", actual_revision[:8], repo)
+        return
+
+    if not expected_snapshot.exists():
+        shutil.copytree(str(actual_snapshot), str(expected_snapshot), symlinks=True)
+        logger.info("Remapped %s: %s -> %s", repo, actual_revision[:8], expected_revision[:8])
 
 
 @ray.remote
@@ -63,6 +80,7 @@ def _run_inference_on_gpu(config: dict) -> None:
     from pathlib import Path
 
     import boto3
+    import botocore.config
     from lilypad.public.sdk_py.cached_file_access.boto import get_readonly_boto_client
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -72,10 +90,6 @@ def _run_inference_on_gpu(config: dict) -> None:
     experiment = config["experiment"]
     spec_json = config.get("spec_json", "multiview_spec.json")
 
-    import botocore.config
-
-    # OCI S3-compat requires payload signing for PUT operations and disables
-    # checksum enforcement (which AWS SDK 2.x sends by default).
     _oci_config = botocore.config.Config(
         s3={"payload_signing_enabled": True},
         request_checksum_calculation="when_required",
@@ -113,41 +127,41 @@ def _run_inference_on_gpu(config: dict) -> None:
         logger.info("Downloading checkpoint from s3://%s/%s", config["checkpoint_bucket"], config["checkpoint_key"])
         cached_client.download_file(config["checkpoint_bucket"], config["checkpoint_key"], str(ckpt_local))
 
-        # Pre-populate the HF hub cache with the Wan2.1 VAE tokenizer so
-        # checkpoint_db.py finds it without hitting HuggingFace. The HF hub
-        # uses a blobs/<sha256> + snapshots/<rev>/file -> ../../blobs/<sha256>
-        # layout; placing only the file at the snapshot path is insufficient.
+        # Populate HF hub cache from OCI so checkpoint_db.py finds all
+        # auxiliary models (VAE tokenizer, Cosmos-Reason1-7B text encoder)
+        # without hitting HuggingFace. The OCI cache stores real files at
+        # snapshots/<rev>/<filename> — HF hub finds them directly.
         hf_cache_dir = Path(os.environ.get("HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub"))
-        model_cache = hf_cache_dir / _HF_PREDICT2_MODEL
-        blob_path = model_cache / "blobs" / _HF_TOKENIZER_BLOB_SHA256
-        snapshot_dir = model_cache / "snapshots" / _HF_TOKENIZER_REVISION
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        hf_cache_bucket = config["hf_cache_bucket"]
+        hf_cache_prefix = config["hf_cache_prefix"].rstrip("/")
+        logger.info("Downloading HF model cache from s3://%s/%s", hf_cache_bucket, hf_cache_prefix)
+        for page in paginator.paginate(Bucket=hf_cache_bucket, Prefix=hf_cache_prefix + "/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                relative = key[len(hf_cache_prefix):].lstrip("/")
+                dest = hf_cache_dir / relative
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                logger.info("Downloading %s -> %s", key, dest)
+                cached_client.download_file(hf_cache_bucket, key, str(dest))
 
-        logger.info(
-            "Downloading VAE tokenizer from s3://%s/%s",
-            config["tokenizer_bucket"],
-            config["tokenizer_key"],
+        # checkpoint_db.py hardcodes specific git revisions that may differ from
+        # whatever revision was current when we staged the OCI cache. After
+        # downloading, create snapshot aliases so HF hub finds the expected paths.
+        _remap_hf_snapshot(
+            hf_cache_dir,
+            repo="nvidia/Cosmos-Predict2.5-2B",
+            expected_revision="6787e176dce74a101d922174a95dba29fa5f0c55",
+            logger=logger,
         )
-        cached_client.download_file(config["tokenizer_bucket"], config["tokenizer_key"], str(blob_path))
+        _remap_hf_snapshot(
+            hf_cache_dir,
+            repo="nvidia/Cosmos-Reason1-7B",
+            expected_revision="3210bec0495fdc7a8d3dbb8d58da5711eab4b423",
+            logger=logger,
+        )
 
-        # Symlink: snapshots/<rev>/tokenizer.pth -> ../../blobs/<sha256>
-        symlink_path = snapshot_dir / "tokenizer.pth"
-        if not symlink_path.exists():
-            symlink_path.symlink_to(Path("../../blobs") / _HF_TOKENIZER_BLOB_SHA256)
-
-        # refs/main so snapshot_download resolves the default revision.
-        refs_dir = model_cache / "refs"
-        refs_dir.mkdir(parents=True, exist_ok=True)
-        (refs_dir / "main").write_text(_HF_TOKENIZER_REVISION)
-
-        # Propagate HF_TOKEN so the Qwen/Cosmos-Reason1-7B text encoder can
-        # download from HuggingFace. Do NOT set HF_HUB_OFFLINE globally — it
-        # would also block the Reason1-7B download.
-        if "HF_TOKEN" in os.environ:
-            logger.info("HF_TOKEN found; HuggingFace downloads will be authenticated.")
-        else:
-            logger.warning("HF_TOKEN not set; gated HuggingFace models may fail to download.")
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        logger.info("HF cache populated; offline mode enabled")
 
         output_dir.mkdir(parents=True)
 
@@ -160,18 +174,20 @@ def _run_inference_on_gpu(config: dict) -> None:
             "-o", str(output_dir),
             "--checkpoint_path", str(ckpt_local),
             "--experiment", experiment,
+            # Guardrail model (nvidia/Cosmos-Guardrail1) is not staged in OCI;
+            # we don't need content safety checks for internal inference.
+            "--disable-guardrails",
         ]
         logger.info("Running: %s", " ".join(cmd))
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
-            # Upload console.log (written by multiview init) before raising so
-            # the traceback is retrievable from OCI even after the job fails.
+            # Upload console.log before raising so the traceback is readable from OCI.
             console_log = output_dir / "console.log"
             if console_log.exists():
                 debug_key = f"{config['output_prefix']}/_debug/console.log"
                 try:
                     plain_client.upload_file(str(console_log), config["output_bucket"], debug_key)
-                    logger.info("Uploaded console.log to s3://%s/%s for debugging", config["output_bucket"], debug_key)
+                    logger.info("Uploaded console.log to s3://%s/%s", config["output_bucket"], debug_key)
                 except Exception as upload_err:
                     logger.warning("Could not upload console.log: %s", upload_err)
             raise RuntimeError(f"torchrun exited with code {result.returncode}")
@@ -194,6 +210,8 @@ def run(config: dict) -> None:
         assets_prefix:      prefix under which the assets/ tree is stored
         checkpoint_bucket:  OCI bucket containing the model checkpoint
         checkpoint_key:     full object key for model_ema_bf16.pt
+        hf_cache_bucket:    OCI bucket containing the pre-staged HF model cache
+        hf_cache_prefix:    prefix under which the HF cache tree is stored
         output_bucket:      OCI bucket to upload inference outputs to
         output_prefix:      prefix under which outputs will be written
         experiment:         --experiment arg passed to examples.multiview
