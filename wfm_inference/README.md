@@ -1,7 +1,7 @@
 # WFM Inference — Lilypad Entrypoint
 
 Runs Cosmos Transfer 2.5 multiview inference on Lilypad generic workloads.
-The workload config lives at `adp/services/wfm/workload_configs/cosmos_transfer_inference.yaml`
+The workload config lives at `adp/services/wfm/lilypad_workload_configs/cosmos_transfer_inference.yaml`
 in the applied3 repo.
 
 ## Architecture
@@ -22,7 +22,7 @@ Export OCI credentials, then launch:
 ```bash
 export AWS_ACCESS_KEY_ID=<oci-access-key>
 export AWS_SECRET_ACCESS_KEY=<oci-secret-key>
-lilypad workload launch adp/services/wfm/workload_configs/cosmos_transfer_inference.yaml
+lilypad workload launch adp/services/wfm/lilypad_workload_configs/cosmos_transfer_inference.yaml
 ```
 
 The workload config contains a base `entrypoint_fn_config` that the WFM gRPC service
@@ -55,7 +55,7 @@ docker build -f Dockerfile \
 docker push us-phoenix-1.ocir.io/idskhu5vqvtl/lilypad/sds:cosmos_transfer2.5_v<VERSION>
 ```
 
-Then update `docker_image` in `cosmos_transfer_inference.yaml` to match.
+Then update `docker_image` in `lilypad_workload_configs/cosmos_transfer_inference.yaml` to match.
 
 Most layers are shared with the previous tag, so rebuilds are fast (under a minute when
 only Python files changed).
