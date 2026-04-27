@@ -31,15 +31,49 @@ will override per-job at submission time. For manual test runs the defaults poin
 
 ## Config Keys
 
+Shared fields (top-level, same for every job in the batch):
+
 | Key | Description |
 |-----|-------------|
-| `assets_bucket` / `assets_prefix` | OCI location of the input asset tree (spec JSON + camera frames) |
-| `checkpoint_bucket` / `checkpoint_key` | OCI path to `model_ema_bf16.pt` |
-| `hf_cache_bucket` / `hf_cache_prefix` | OCI prefix holding the pre-staged HuggingFace model cache (see below) |
-| `output_bucket` / `output_prefix` | OCI destination for generated video files |
+| `checkpoint_bucket` / `checkpoint_key` | OCI path to `model_ema_bf16.pt` — downloaded once |
+| `hf_cache_bucket` / `hf_cache_prefix` | OCI prefix holding the pre-staged HuggingFace model cache — downloaded once |
 | `experiment` | `--experiment` arg passed to `examples.multiview` |
-| `spec_json` | Spec file path relative to the assets root (default: `multiview_spec.json`) |
 | `num_gpus` | GPUs to claim on the worker (default: 8) |
+
+Per-job fields (under `jobs` list, or at top level for a single job):
+
+| Key | Description |
+|-----|-------------|
+| `input_bucket` / `input_prefix` | OCI location of the input asset tree (spec JSON + camera frames) |
+| `output_bucket` / `output_prefix` | OCI destination for generated video files |
+| `spec_json` | Spec file path relative to the assets root (default: `multiview_spec.json`) |
+
+### Batch example
+
+```yaml
+entrypoint_fn_config:
+  checkpoint_bucket: sensor-sim-wfm
+  checkpoint_key: checkpoints/iter_10k/model_ema_bf16.pt
+  hf_cache_bucket: sensor-sim-wfm
+  hf_cache_prefix: checkpoints/hf-cache
+  experiment: transfer2_auto_multiview_post_train_example
+  num_gpus: 8
+  jobs:
+    - input_bucket: sensor-sim-wfm
+      input_prefix: inputs/scene_001
+      output_bucket: sensor-sim-wfm
+      output_prefix: inferences/scene_001
+      spec_json: multiview_spec.json
+    - input_bucket: sensor-sim-wfm
+      input_prefix: inputs/scene_002
+      output_bucket: sensor-sim-wfm
+      output_prefix: inferences/scene_002
+      spec_json: multiview_spec.json
+```
+
+The checkpoint and HF cache are downloaded once; each job then downloads its own
+assets, runs torchrun, and uploads outputs before the next job starts. Omitting
+`jobs` and using a flat config still works (single-job backward-compatible format).
 
 ## Building and Pushing the Docker Image
 
