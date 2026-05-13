@@ -1,5 +1,6 @@
 """Lilypad entrypoint for Cosmos Transfer 2.5 WFM inference."""
 
+import json
 import logging
 import os
 import subprocess
@@ -25,6 +26,26 @@ _OCI_BOTO_CONFIG = botocore.config.Config(
 # across jobs in a batch (checkpoint, HF cache). Lives outside tempdir so it
 # is not cleaned up between jobs.
 _WORKER_CACHE_DIR = Path("/tmp/wfm_worker_cache")
+
+
+def _apply_recipe_overrides(spec: dict, recipe_overrides: dict) -> None:
+    """Apply recipe overrides from the WFM InferenceRecipe onto a spec.json dict in-place.
+
+    camera_conditional_frames maps camera names to frame counts and is merged into
+    each camera sub-dict (creating it if absent). An inline prompt replaces prompt_path.
+    All other keys are applied at the top level.
+    """
+    for key, value in recipe_overrides.items():
+        if key == "camera_conditional_frames":
+            for camera, frame_count in value.items():
+                if camera not in spec:
+                    spec[camera] = {}
+                spec[camera]["num_conditional_frames_per_view"] = frame_count
+        elif key == "prompt":
+            spec["prompt"] = value
+            spec.pop("prompt_path", None)
+        else:
+            spec[key] = value
 
 
 def _remap_hf_snapshot(
@@ -134,6 +155,7 @@ def _setup_hf_cache(
 @ray.remote
 def _run_batch_on_gpu(base_config: dict, jobs: list[dict]) -> None:
     """Runs on the GPU worker. Downloads shared resources once, then runs all jobs."""
+    import json
     import logging
     import os
     import subprocess
@@ -190,7 +212,8 @@ def _run_batch_on_gpu(base_config: dict, jobs: list[dict]) -> None:
         input_prefix = job["input_prefix"]
         output_bucket = job["output_bucket"]
         output_prefix = job["output_prefix"]
-        spec_json = job.get("spec_json", "multiview_spec.json")
+        spec_json = job.get("spec_json", "spec.json")
+        recipe_overrides = job.get("recipe_overrides", {})
 
         logger.info("Job %d/%d: s3://%s/%s -> s3://%s/%s",
                     i + 1, len(jobs), input_bucket, input_prefix, output_bucket, output_prefix)
@@ -209,6 +232,15 @@ def _run_batch_on_gpu(base_config: dict, jobs: list[dict]) -> None:
                     dest = assets_dir / relative
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     plain_client.download_file(input_bucket, key, str(dest))
+
+            if recipe_overrides:
+                spec_path = assets_dir / spec_json
+                with open(spec_path) as f:
+                    spec_data = json.load(f)
+                _apply_recipe_overrides(spec_data, recipe_overrides)
+                with open(spec_path, "w") as f:
+                    json.dump(spec_data, f, indent=2)
+                logger.info("Applied recipe overrides to %s", spec_json)
 
             cmd = [
                 "torchrun",
@@ -244,6 +276,12 @@ def _run_batch_on_gpu(base_config: dict, jobs: list[dict]) -> None:
             for path in output_files:
                 key = f"{output_prefix}/{path.relative_to(output_dir)}".lstrip("/")
                 plain_client.upload_file(str(path), output_bucket, key)
+
+            plain_client.put_object(
+                Body=b"",
+                Bucket=output_bucket,
+                Key=f"{output_prefix}/succeed.txt",
+            )
             logger.info("Job %d/%d upload complete", i + 1, len(jobs))
 
 
@@ -284,7 +322,7 @@ def run(config: dict) -> None:
             "input_prefix": config["input_prefix"],
             "output_bucket": config["output_bucket"],
             "output_prefix": config["output_prefix"],
-            "spec_json": config.get("spec_json", "multiview_spec.json"),
+            "spec_json": config.get("spec_json", "spec.json"),
         }]
         base_config = config
 

@@ -89,6 +89,14 @@ docker build -f Dockerfile \
 docker push us-phoenix-1.ocir.io/idskhu5vqvtl/lilypad/sds:cosmos_transfer2.5_v<VERSION>
 ```
 
+Make sure you've docker loged in, for example:
+```bash
+docker login us-phoenix-1.ocir.io -u idskhu5vqvtl/yun@applied.co
+```
+
+Get an OCI auth token from OCI profile and paste it as the password when prompt.
+
+
 Then update `docker_image` in `lilypad_workload_configs/cosmos_transfer_inference.yaml` to match.
 
 Most layers are shared with the previous tag, so rebuilds are fast (under a minute when

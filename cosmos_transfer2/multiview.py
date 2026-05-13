@@ -155,8 +155,8 @@ class MultiviewInference:
 
         if self.rank0:
             output_dir.mkdir(parents=True, exist_ok=True)
-            open(f"{output_path}.json", "w").write(sample.model_dump_json())
-            log.info(f"Saved arguments to {output_path}.json")
+            open(str(output_dir / "spec.json"), "w").write(sample.model_dump_json())
+            log.info(f"Saved arguments to {output_dir / 'spec.json'}")
 
         # setup the control and input videos dict
         input_video_file_dict = {}
@@ -359,12 +359,12 @@ class MultiviewInference:
                     log.warning("Guardrail checks on video are disabled")
 
                 def save_combined_video():
-                    save_img_or_video(video, str(output_path), fps=sample.fps, quality=8)
-                    log.success(f"Generated video saved to {output_path}.mp4")
+                    save_img_or_video(video, str(output_dir / "combined"), fps=sample.fps, quality=8)
+                    log.success(f"Generated video saved to {output_dir / 'combined'}.mp4")
 
                 if sample.save_combined_views:
                     save_combined_video()
-                    return f"{output_path}.mp4"
+                    return str(output_dir / "combined.mp4")
 
                 total_frames = video.shape[1]
                 n_views = len(augmentation_config.camera_keys)
@@ -393,7 +393,7 @@ class MultiviewInference:
                 # Save individual view videos
                 output_messages = []
                 for view_name, view_tensor in view_tensors:
-                    view_output_path = f"{output_path}_{view_name}"
+                    view_output_path = str(output_dir / view_name)
                     save_img_or_video(view_tensor, view_output_path, fps=sample.fps, quality=8)
                     output_messages.append(f"{view_output_path}.mp4")
 
@@ -407,7 +407,7 @@ class MultiviewInference:
                     row, col = idx // grid_cols, idx % grid_cols
                     grid_tensor[:, :, row * h : (row + 1) * h, col * w : (col + 1) * w] = view_tensors[idx][1]
 
-                grid_output_path = f"{output_path}_grid"
+                grid_output_path = str(output_dir / "grid")
                 save_img_or_video(grid_tensor, grid_output_path, fps=sample.fps, quality=8)
                 output_messages.append(
                     f"{grid_output_path}.mp4 ({num_views_in_grid} views in {grid_rows}x{grid_cols} grid)"
